@@ -1,0 +1,522 @@
+---
+title: "膳食活性微生物，益生元益生菌和关节炎"
+author: "LA"
+output: html_document
+date: "2024-03-25"
+---
+
+# Set up
+
+## Load libraries
+
+```{r setup, include=TRUE}
+
+setwd('E:/BaiduSyncdisk/R working directory/arthritis')
+
+library(nhanesR)
+library(dplyr)
+library(survey)
+```
+
+# 数据分析
+
+## 数据提取
+
+人口学特征，BMI,吸烟饮酒等协变量提取
+
+```{r}
+demo <- nhs_tsv('demo_d|demo_e|demo_f|demo_g|demo_h|demo_i',years = 2005:2016)
+bmx <- nhs_tsv('bmx_d|bmx_e|bmx_f|bmx_g|bmx_h|bmx_i',years = 2005:2016) 
+smq <- nhs_tsv('smq_d|smq_e|smq_f|smq_g|smq_h|smq_i',years = 2005:2016)
+alq <- nhs_tsv('alq_d|alq_e|alq_f|alq_g|alq_h|alq_i',years = 2005:2016)
+cbc <- nhs_tsv('cbc_d|cbc_e|cbc_f|cbc_g|cbc_h|cbc_i',years = 2005:2016)
+mcq <- nhs_tsv('mcq_d|mcq_e|mcq_f|mcq_g|mcq_h|mcq_i',years = 2005:2016)
+```
+
+合并协变量,膳食活性微生物，非膳食益生元益生菌，关节炎以及饮食权重数据
+
+```{r}
+p <- nhs_read(demo,
+              'ridageyr:age',
+              'riagendr:sex',
+              'dmdeduc2:edu',
+              'indfmpir:poverty',
+              'dmdmartl:marital',
+              'ridreth1:eth',
+              bmx,'bmxbmi:bmi',
+              smq,
+              'smq020:smoke',
+              alq,'ald100,alq101:alcohol',
+              cbc,'lbdneno:neutrophil','lbxwbcsi:wbc',
+                mcq,'mcq230A:mcq1','mcq230B:mcq2','mcq230C:mcq3','mcq230D:mcq4',
+              codebook = TRUE)|>
+  db_dr.live.microbes(years = 2005:2016,#膳食活性微生物
+                        grams_Lo = TRUE,
+                        grams_Med = TRUE,
+                        grams_Hi = TRUE,
+                        Year = TRUE)|>
+    DSD(years = 2005:2016, #益生菌益生元
+        prebiotic = TRUE, 
+        probiotic = TRUE,
+        Year = FALSE,
+        join = "left")|>
+    diag_arthritis(years= 2005:2016,#关节炎
+                   arthritis = TRUE,
+                   arghritis_type = TRUE,
+                   Year = FALSE,
+                   join = "left")|>
+    db_drtot(years= 2005:2016,#饮食权重
+             wtdr2d = TRUE,
+             join = "left")
+```
+
+原始数据导出
+```{r}
+write.csv(p,file = 'p.csv')
+```
+
+导入饮食模型数据并分组
+
+```{r}
+dp <- read.csv("dp.csv",header = T)
+dp <- drop_col(dp,'X')
+dp$medQ <- quant(dp$med, n = 5, Q = TRUE, round = 3)
+dp$aheiQ <- quant(dp$ahei, n = 5, Q = TRUE, round = 3)
+dp$diiQ <- quant(dp$dii, n = 5, Q = TRUE, round = 3)
+dp$heiQ <- quant(dp$hei, n = 5, Q = TRUE, round = 3)
+```
+
+饮食模型数据合并
+
+```{r}
+p <- Full_Join(dp,p,by = "seqn", cat = TRUE, inspect = NULL)
+```
+
+## 数据清洗
+
+去除权重缺失值和0
+
+```{r}
+p <- drop_row(p, is.na(p$wtdr2d))
+p <- drop_row(p, p$wtdr2d == 0)
+```
+
+合并权重计算
+
+```{r}
+p$nhs_wt <- 1/6 * p$wtdr2d
+```
+
+选取18岁及以上的
+
+```{r}
+p <- drop_row(p,p$age<18)
+```
+
+重新编码，添加新列，判断关节炎类型
+
+```{r}
+p$arghritis_type <- paste0(p$arthritis,'~',p$arghritis_type)
+p$arghritis_type <- Recode(p$arghritis_type,
+                           "NA~NA::NA",
+                           "no~NA::HC",
+                           "yes~osteoarthritis::OA",
+                           "yes~other::other",
+                           "yes~rheumatoid arthritis::RA",
+                           "yes~NA::NA",
+                           "yes~psoriatic arthritis::other",
+                           "yes~osteoarthritis or degenerative arthritis::OA",
+                           to.numeric = FALSE)
+p$arghritis_type <- factor(p$arghritis_type, levels = c('HC','OA','RA','other'))
+```
+
+去除关节炎缺失值
+
+```{r}
+p <- drop_row(p, is.na(p$arghritis_type)) 
+```
+
+去除膳食活性微生物缺失值
+
+```{r}
+p <- drop_row(p, is.na(p$grams_Lo)) 
+p <- drop_row(p, is.na(p$grams_Med)) 
+p <- drop_row(p, is.na(p$grams_Hi))
+```
+
+膳食活性微生物重新编码分组
+
+```{r}
+p <- p %>% newVb('microbe',
+                 grams_Lo > 0 & grams_Hi == 0 & grams_Med == 0 ~'low',
+                 grams_Med > 0 & grams_Hi == 0 ~ 'medium',
+                 grams_Hi > 0 ~ 'high') 
+p$microbe <- factor(p$microbe, levels = c('low','medium','high'))
+```
+
+重新编码，添加新列，判断是否有非膳食益生元益生菌摄入
+
+```{r}
+p$prebioticnew <- paste0(p$Prebiotic,'~',p$Probiotic)
+p$prebioticnew <- Recode(p$prebioticnew,
+                         "NA~NA::NA",
+                         "no~no::no",
+                         "no~yes::yes",
+                         "yes~no::yes",
+                         "yes~yes::yes",
+                         to.numeric = FALSE)
+```
+
+去除非膳食益生元益生菌缺失值
+
+```{r}
+p <- drop_row(p, is.na(p$prebioticnew)) 
+```
+
+重新分组编码，调整教育贫困婚姻种族BMI等协变量分组信息
+
+```{r}
+p$edu <- Recode(p$edu,
+                "Less Than 9th Grade::Less than High School",
+                "Less than 9th grade::Less than High School",
+                "9-11th Grade (Includes 12th grade with no diploma)::Less than High School",
+                "9-11th grade (Includes 12th grade with no diploma)::Less than High School",
+                "High School Grad/GED or Equivalent::High School Grad",
+                "High school graduate/GED or equivalent::High School Grad",
+                "Some College or AA degree::Above High School",
+                "Some college or AA degree::Above High School",
+                "College Graduate or above::Above High School",
+                "College graduate or above::Above High School",
+                "Refused::NA",
+                "Don't Know::NA",
+                "NA::NA",
+                to.numeric = FALSE)
+p$marital <- Recode(p$marital,
+                    "Married::Married/Living with partner",
+                    "Living with partner::Married/Living with partner",
+                    "Widowed::Widowed/Divorced/Separated",
+                    "Divorced::Widowed/Divorced/Separated",
+                    "Separated::Widowed/Divorced/Separated",
+                    "Never married::Never married",
+                    "Refused::NA",
+                    "Don't know::NA",
+                    to.numeric = FALSE)
+p$eth <- Recode(p$eth,
+                "Mexican American::Mexican American",
+                "Other Hispanic::Other",
+                "Other Race - Including Multi-Racial::Other",
+                to.numeric = FALSE)
+p <- p %>% newVb('povertynew',
+                 poverty < 1.31 ~ 'low',
+                 poverty <=3.5 ~ 'medium',
+                 poverty > 3.5 ~ 'high')
+p <- p %>% newVb('bminew',
+                bmi < 25 ~ 'normal',
+                 bmi <30 ~ 'overweight',
+                 bmi >= 30 ~ 'obese')
+p$marital <- factor(p$marital, levels = c('Married/Living with partner','Widowed/Divorced/Separated','Never married'))
+p$povertynew <- factor(p$povertynew, levels = c('low','medium','high'))
+p$bminew <- factor(p$bminew, levels = c('normal','overweight','obese'))
+```
+
+去除消化道肿瘤(胃癌，结直肠癌)
+```{r}
+p <- drop_row(p,p$mcq1 == 'Colon')
+p <- drop_row(p,p$mcq2 == 'Colon')
+p <- drop_row(p,p$mcq3 == 'Colon')
+p <- drop_row(p,p$mcq4 == 'Colon')
+p <- drop_row(p,p$mcq1 == 'Rectum (rectal)')
+p <- drop_row(p,p$mcq2 == 'Rectum (rectal)')
+p <- drop_row(p,p$mcq3 == 'Rectum (rectal)')
+p <- drop_row(p,p$mcq4 == 'Rectum (rectal)')
+p <- drop_row(p,p$mcq1 == 'Stomach')
+p <- drop_row(p,p$mcq2 == 'Stomach')
+p <- drop_row(p,p$mcq3 == 'Stomach')
+p <- drop_row(p,p$mcq4 == 'Stomach')
+```
+
+去除协变量缺失值
+
+```{r}
+p <- drop_row(p, is.na(p$med))
+p <- drop_row(p, is.na(p$ahei))
+p <- drop_row(p, is.na(p$dii))
+p <- drop_row(p, is.na(p$hei))
+p <- drop_row(p, is.na(p$edu)) 
+p <- drop_row(p, is.na(p$povertynew)) 
+p <- drop_row(p, is.na(p$marital)) 
+p <- drop_row(p, is.na(p$eth))
+p <- drop_row(p, is.na(p$bminew)) 
+p <- drop_row(p, is.na(p$smoke)) 
+p <- drop_row(p, is.na(p$alcohol)) 
+p <- drop_row(p, is.na(p$neutrophil))
+p <- drop_row(p, is.na(p$wbc))
+```
+
+加权
+
+```{r}
+nhs <- svy_design(p)
+```
+
+## ra回归分析
+
+赋值ra为1或0
+
+```{r}
+p$arghritis_typera <- Recode(p$arghritis_type,
+                             "OA::2",
+                             "HC::0",
+                             "other::2",
+                             "RA::1",
+                             to.numeric = TRUE)
+p <- drop_row(p, p$arghritis_typera == 2)
+```
+
+赋值后重新加权
+
+```{r}
+nhs <- svy_design(p)
+```
+
+
+### 非膳食益生元益生菌ra单因素分析
+
+```{r}
+rau1 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('prebioticnew'))
+write.csv(rau1,file = 'rau1.csv')
+```
+
+### 膳食活性微生物ra单因素回归
+```{r}
+#批量
+ra <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('age', 'sex', 'edu', 'marital','eth', 'povertynew' , 'bminew','smoke','alcohol','neutrophil','wbc','medQ' ,'aheiQ', 'diiQ','heiQ'))
+write.csv(ra,file = 'ra.csv')
+```
+```
+
+```{r}
+rau2 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('microbe'))
+write.csv(rau2,file = 'rau2.csv')
+```
+
+### 各协变量与ra单因素回归
+
+```{r}
+rau3 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('age'))
+write.csv(rau3,file = 'rau3.csv')
+```
+
+```{r}
+rau4 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('sex'))
+write.csv(rau4,file = 'rau4.csv')
+```
+
+```{r}
+rau5 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('edu'))
+write.csv(rau5,file = 'rau5.csv')
+```
+
+```{r}
+rau6 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('povertynew'))
+write.csv(rau6,file = 'rau6.csv')
+```
+
+```{r}
+rau7 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('marital'))
+write.csv(rau7,file = 'rau7.csv')
+```
+
+```{r}
+rau8 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('eth'))
+write.csv(rau8,file = 'rau8.csv')
+```
+
+```{r}
+rau9 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('bminew'))
+write.csv(rau9,file = 'rau9.csv')
+```
+
+
+```{r}
+rau10 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('smoke'))
+write.csv(rau10,file = 'rau10.csv')
+```
+
+```{r}
+rau11 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('alcohol'))
+write.csv(rau11,file = 'rau11.csv')
+```
+
+```{r}
+rau12 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('medQ'))
+write.csv(rau12,file = 'rau12.csv')
+```
+
+```{r}
+rau13 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('aheiQ'))
+write.csv(rau13,file = 'rau13.csv')
+```
+
+```{r}
+rau14 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('diiQ'))
+write.csv(rau14,file = 'rau14.csv')
+```
+
+```{r}
+rau15 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('heiQ'))
+write.csv(rau15,file = 'rau15.csv')
+```
+
+```{r}
+rau16 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('neutrophil'))
+write.csv(rau16,file = 'rau16.csv')
+```
+
+```{r}
+rau17 <- svy_uv.logit(design = nhs,
+             y = 'arghritis_typera',
+             x = c('wbc'))
+write.csv(rau17,file = 'rau17.csv')
+```
+
+### 非膳食益生元益生菌与ra多因素分析
+
+调整模型1
+
+```{r}
+ram1 <- svyglm(arghritis_typera ~ prebioticnew+ age + sex ,nhs,
+       family = quasibinomial()) |>
+    reg_table()
+write.csv(ram1,file = 'ram1.csv')
+```
+
+调整模型2
+
+```{r}
+ram2 <- svyglm(arghritis_typera ~ prebioticnew + age + sex + bminew + smoke + alcohol,nhs,
+       family = quasibinomial()) |>
+    reg_table()
+write.csv(ram2,file = 'ram2.csv')
+```
+
+调整模型3
+
+```{r}
+ram3 <- svyglm(arghritis_typera ~ prebioticnew + age + sex + edu + povertynew + eth + marital + bminew + smoke + alcohol ,nhs,
+       family = quasibinomial()) |>
+    reg_table()
+write.csv(ram3,file = 'ram3.csv')
+```
+
+调整模型4
+
+```{r}
+ram4 <- svyglm(arghritis_typera ~ prebioticnew + age + sex + edu + povertynew + eth + marital + bminew + smoke + alcohol+ medQ + aheiQ + diiQ + heiQ+neutrophil+wbc ,nhs,
+       family = quasibinomial()) |>
+    reg_table()
+write.csv(ram4,file = 'ram4.csv')
+```
+
+### 膳食活性微生物与RA多因素分析
+
+调整模型1
+
+```{r}
+ram5 <- svyglm(arghritis_typera ~ microbe + age + sex ,nhs,
+       family = quasibinomial()) |>
+    reg_table()
+write.csv(ram5,file = 'ram5.csv')
+```
+
+调整模型2
+
+```{r}
+ram6 <- svyglm(arghritis_typera ~ microbe + age + sex + bminew + smoke + alcohol,nhs,
+       family = quasibinomial()) |>
+    reg_table()
+write.csv(ram6,file = 'ram6.csv')
+```
+
+调整模型3
+
+```{r}
+ram7 <- svyglm(arghritis_typera ~ microbe + age + sex + edu + povertynew + eth + marital+ bminew + smoke + alcohol ,nhs,
+       family = quasibinomial()) |>
+    reg_table()
+write.csv(ram7,file = 'ram7.csv')
+```
+
+调整模型4
+
+```{r}
+ram8 <- svyglm(arghritis_typera ~ microbe + age + sex + edu + povertynew + eth + marital + bminew + smoke + alcohol+ medQ + aheiQ + diiQ + heiQ+neutrophil+wbc ,nhs,family = quasibinomial()) |>
+    reg_table()
+write.csv(ram8,file = 'ram8.csv')
+```
+
+### 亚组分析
+
+年龄以60岁分组
+
+```{r}
+p1 <- p %>% newVb('agenew',
+                 age < 60 ~ 'age<60',
+                 age >=60 ~ 'age>=60')
+```
+
+白细胞中性粒五分位分组
+```{r}
+p1$neutrophil <- quant(p1$neutrophil, n = 5, Q = TRUE, round = 3)
+p1$wbc <- quant(p1$wbc, n = 5, Q = TRUE, round = 3)
+```
+
+亚组分析
+
+```{r}
+stratum_model(object = p1,
+              y = 'arghritis_typera',
+              x = 'microbe',
+              stratum = c('agenew','sex','edu','povertynew','eth','marital','bminew','smoke','alcohol','medQ','aheiQ','diiQ','heiQ','neutrophil','wbc'),
+              xlsx = 'ra亚组分析.xlsx',
+              round = 2)
+```
+
+
+
+
+
